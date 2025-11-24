@@ -152,7 +152,83 @@ def extract_kart_objects(
         - is_center_kart: Boolean indicating if this is the kart closest to image center
     """
 
-    raise NotImplementedError("Not implemented")
+    # Read the info.json file
+    with open(info_path) as f:
+        info = json.load(f)
+    
+    # Get kart names
+    kart_names = info["karts"]
+    
+    # Get detections for this view
+    if view_index >= len(info["detections"]):
+        return []
+    
+    frame_detections = info["detections"][view_index]
+    
+    # Calculate scaling factors (from 600x400 to 150x100)
+    scale_x = img_width / ORIGINAL_WIDTH
+    scale_y = img_height / ORIGINAL_HEIGHT
+    
+    kart_objects = []
+    
+    # Process each detection
+    for detection in frame_detections:
+        class_id, track_id, x1, y1, x2, y2 = detection
+        class_id = int(class_id)
+        track_id = int(track_id)
+        
+        # Only process karts (class_id == 1)
+        if class_id != 1:
+            continue
+        
+        # Scale coordinates to image size
+        x1_scaled = x1 * scale_x
+        y1_scaled = y1 * scale_y
+        x2_scaled = x2 * scale_x
+        y2_scaled = y2 * scale_y
+        
+        # Skip if bounding box is too small
+        if (x2_scaled - x1_scaled) < min_box_size or (y2_scaled - y1_scaled) < min_box_size:
+            continue
+        
+        # Filter out karts that are completely out of bounds
+        if x2_scaled < 0 or x1_scaled > img_width or y2_scaled < 0 or y1_scaled > img_height:
+            continue
+        
+        # Calculate center point of the bounding box
+        center_x = (x1_scaled + x2_scaled) / 2
+        center_y = (y1_scaled + y2_scaled) / 2
+        
+        # Get kart name using track_id as index
+        kart_name = kart_names[track_id]
+        
+        kart_objects.append({
+            "instance_id": track_id,
+            "kart_name": kart_name,
+            "center": (center_x, center_y),
+            "is_center_kart": False  # Will update this next
+        })
+    
+    # Identify the ego car (kart closest to image center)
+    if kart_objects:
+        image_center_x = img_width / 2
+        image_center_y = img_height / 2
+        
+        min_distance = float('inf')
+        center_kart_idx = 0
+        
+        for idx, kart in enumerate(kart_objects):
+            cx, cy = kart["center"]
+            # Calculate Euclidean distance to image center
+            distance = ((cx - image_center_x) ** 2 + (cy - image_center_y) ** 2) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                center_kart_idx = idx
+        
+        # Mark the center kart as ego car
+        kart_objects[center_kart_idx]["is_center_kart"] = True
+    
+    return kart_objects
 
 
 def extract_track_info(info_path: str) -> str:
@@ -166,7 +242,10 @@ def extract_track_info(info_path: str) -> str:
         Track name as a string
     """
 
-    raise NotImplementedError("Not implemented")
+    with open(info_path) as f:
+        info = json.load(f)
+    
+    return info["track"]
 
 
 def generate_qa_pairs(info_path: str, view_index: int, img_width: int = 150, img_height: int = 100) -> list:
@@ -202,7 +281,112 @@ def generate_qa_pairs(info_path: str, view_index: int, img_width: int = 150, img
     # How many karts are in front of the ego car?
     # How many karts are behind the ego car?
 
-    raise NotImplementedError("Not implemented")
+    # Extract kart objects and track info
+    kart_objects = extract_kart_objects(info_path, view_index, img_width, img_height)
+    track_name = extract_track_info(info_path)
+    
+    qa_pairs = []
+    
+    # Find the ego car (center kart)
+    ego_car = None
+    for kart in kart_objects:
+        if kart["is_center_kart"]:
+            ego_car = kart
+            break
+    
+    # If no ego car found, return empty list
+    if ego_car is None:
+        return []
+    
+    ego_center_x, ego_center_y = ego_car["center"]
+    
+    # 1. Ego car question
+    qa_pairs.append({
+        "question": "What kart is the ego car?",
+        "answer": ego_car["kart_name"]
+    })
+    
+    # 2. Total karts question
+    qa_pairs.append({
+        "question": "How many karts are there in the scenario?",
+        "answer": str(len(kart_objects))
+    })
+    
+    # 3. Track information question
+    qa_pairs.append({
+        "question": "What track is this?",
+        "answer": track_name
+    })
+    
+    # 4. Relative position questions for each non-ego kart
+    for kart in kart_objects:
+        if kart["is_center_kart"]:
+            continue
+        
+        kart_center_x, kart_center_y = kart["center"]
+        kart_name = kart["kart_name"]
+        
+        # Determine left/right position
+        if kart_center_x < ego_center_x:
+            lr_position = "left"
+        else:
+            lr_position = "right"
+        
+        qa_pairs.append({
+            "question": f"Is {kart_name} to the left or right of the ego car?",
+            "answer": lr_position
+        })
+        
+        # Determine front/behind position
+        # Higher Y coordinate = further up in the image = in front
+        if kart_center_y > ego_center_y:
+            fb_position = "in front"
+        else:
+            fb_position = "behind"
+        
+        qa_pairs.append({
+            "question": f"Is {kart_name} in front of or behind the ego car?",
+            "answer": fb_position
+        })
+        
+        # Combined position question
+        combined_position = f"{lr_position} and {fb_position}"
+        qa_pairs.append({
+            "question": f"Where is {kart_name} relative to the ego car?",
+            "answer": combined_position
+        })
+    
+    # 5. Counting questions
+    count_left = sum(1 for kart in kart_objects 
+                     if not kart["is_center_kart"] and kart["center"][0] < ego_center_x)
+    count_right = sum(1 for kart in kart_objects 
+                      if not kart["is_center_kart"] and kart["center"][0] > ego_center_x)
+    count_front = sum(1 for kart in kart_objects 
+                      if not kart["is_center_kart"] and kart["center"][1] > ego_center_y)
+    count_behind = sum(1 for kart in kart_objects 
+                       if not kart["is_center_kart"] and kart["center"][1] < ego_center_y)
+    
+    qa_pairs.append({
+        "question": "How many karts are to the left of the ego car?",
+        "answer": str(count_left)
+    })
+    
+    qa_pairs.append({
+        "question": "How many karts are to the right of the ego car?",
+        "answer": str(count_right)
+    })
+    
+    qa_pairs.append({
+        "question": "How many karts are in front of the ego car?",
+        "answer": str(count_front)
+    })
+    
+    qa_pairs.append({
+        "question": "How many karts are behind the ego car?",
+        "answer": str(count_behind)
+    })
+    
+    return qa_pairs
 
 
 def check_qa_pairs(info_file: str, view_index: int):
