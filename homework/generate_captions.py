@@ -1,34 +1,76 @@
+"""
+Generate captions for SuperTuxKart dataset for CLIP training.
+"""
+
+import json
+import random
 from pathlib import Path
-
 import fire
-from matplotlib import pyplot as plt
+import matplotlib.pyplot as plt
 
-from .generate_qa import draw_detections, extract_frame_info
+from .generate_qa import draw_detections, extract_kart_objects, extract_track_info
 
 
 def generate_caption(info_path: str, view_index: int, img_width: int = 150, img_height: int = 100) -> list:
     """
-    Generate caption for a specific view.
+    Generate captions for a specific view.
+    
+    Returns:
+        List of caption strings describing the scene
     """
-    # 1. Ego car
-    # {kart_name} is the ego car.
-
-    # 2. Counting
-    # There are {num_karts} karts in the scenario.
-
-    # 3. Track name
-    # The track is {track_name}.
-
-    # 4. Relative position
-    # {kart_name} is {position} of the ego car.
-
-    raise NotImplementedError("Not implemented")
+    # Extract kart objects and track info (reuse from generate_qa)
+    kart_objects = extract_kart_objects(info_path, view_index, img_width, img_height)
+    track_name = extract_track_info(info_path)
+    
+    captions = []
+    
+    # Find the ego car
+    ego_car = None
+    for kart in kart_objects:
+        if kart["is_center_kart"]:
+            ego_car = kart
+            break
+    
+    if ego_car is None:
+        return []
+    
+    ego_center_x, ego_center_y = ego_car["center"]
+    
+    # 1. Ego car caption
+    captions.append(f"{ego_car['kart_name']} is the ego car.")
+    
+    # 2. Counting caption
+    captions.append(f"There are {len(kart_objects)} karts in the scenario.")
+    
+    # 3. Track name caption
+    captions.append(f"The track is {track_name}.")
+    
+    # 4. Relative position captions for each non-ego kart
+    for kart in kart_objects:
+        if kart["is_center_kart"]:
+            continue
+        
+        kart_center_x, kart_center_y = kart["center"]
+        kart_name = kart["kart_name"]
+        
+        # Determine left/right
+        lr = "left" if kart_center_x < ego_center_x else "right"
+        
+        # Determine front/back (lower Y = front)
+        fb = "front" if kart_center_y < ego_center_y else "back"
+        
+        # Create position caption
+        position = f"{fb} and {lr}"
+        captions.append(f"{kart_name} is {position} of the ego car.")
+    
+    return captions
 
 
 def check_caption(info_file: str, view_index: int):
+    """Check captions for a specific info file and view index."""
     captions = generate_caption(info_file, view_index)
 
-    print("\nCaption:")
+    print("\nCaptions:")
     print("-" * 50)
     for i, caption in enumerate(captions):
         print(f"{i + 1}. {caption}")
@@ -43,20 +85,70 @@ def check_caption(info_file: str, view_index: int):
     plt.figure(figsize=(12, 8))
     plt.imshow(annotated_image)
     plt.axis("off")
-    plt.title(f"Frame {extract_frame_info(str(image_file))[0]}, View {view_index}")
+    plt.title(f"View {view_index}")
     plt.show()
 
 
-"""
-Usage Example: Visualize QA pairs for a specific file and view:
-   python generate_captions.py check --info_file ../data/valid/00000_info.json --view_index 0
-
-You probably need to add additional commands to Fire below.
-"""
+def generate_all_captions(split='train'):
+    """
+    Generate caption pairs for all images in the dataset.
+    
+    Args:
+        split: Dataset split ('train', 'valid')
+    """
+    data_dir = Path(f'data/{split}')
+    all_caption_pairs = []
+    
+    # Process all images
+    image_files = sorted(data_dir.glob('*_*_im.jpg'))
+    print(f"Found {len(image_files)} images in {data_dir}")
+    
+    for image_path in image_files:
+        # Get view index from filename
+        _, view_index_str, _ = image_path.stem.split('_')
+        view_index = int(view_index_str)
+        
+        # Get corresponding info file
+        frame_id = image_path.stem.split('_')[0]
+        info_path = data_dir / f"{frame_id}_info.json"
+        
+        if not info_path.exists():
+            continue
+        
+        # Generate captions for this image
+        captions = generate_caption(str(info_path), view_index)
+        
+        if not captions:
+            continue
+        
+        # Combine all captions into one descriptive caption
+        combined_caption = " ".join(captions)
+        
+        # Get relative image path
+        relative_image_path = str(image_path.relative_to(data_dir.parent))
+        
+        # Add caption pair
+        all_caption_pairs.append({
+            "caption": combined_caption,
+            "image_file": relative_image_path
+        })
+    
+    print(f"Generated {len(all_caption_pairs)} caption pairs")
+    
+    # Save to JSON
+    output_file = data_dir / f'{split}_captions.json'
+    with open(output_file, 'w') as f:
+        json.dump(all_caption_pairs, f, indent=2)
+    
+    print(f"Saved to {output_file}")
+    return all_caption_pairs
 
 
 def main():
-    fire.Fire({"check": check_caption})
+    fire.Fire({
+        "check": check_caption,
+        "generate": generate_all_captions
+    })
 
 
 if __name__ == "__main__":

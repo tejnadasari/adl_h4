@@ -101,14 +101,30 @@ class CLIP(nn.Module):
         super().__init__()
         self.vision_encoder = vision_encoder
         self.text_encoder = text_encoder
-        # TODO: implement the rest components
-        raise NotImplementedError("Not implemented")
+        
+        # Get the output dimensions of the encoders
+        # Vision encoder output is typically the pooled output
+        vision_dim = vision_encoder.config.hidden_size  # 768 for SmolVLM
+        text_dim = text_encoder.config.hidden_size  # 576 for SmolVLM
+        
+        # Projection layers to map to common embedding space
+        self.vision_projection = nn.Linear(vision_dim, proj_dim, bias=False)
+        self.text_projection = nn.Linear(text_dim, proj_dim, bias=False)
+        
+        # Learnable temperature parameter
+        self.logit_scale = nn.Parameter(torch.ones([]) * torch.log(torch.tensor(1 / temperature)))
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        return self.vision_encoder(image)
+        vision_outputs = self.vision_encoder(image)
+        # Get the pooled output (CLS token)
+        pooled_output = vision_outputs.pooler_output if hasattr(vision_outputs, 'pooler_output') else vision_outputs.last_hidden_state[:, 0]
+        return self.vision_projection(pooled_output)
 
-    def encode_text(self, text: str) -> torch.Tensor:
-        return self.text_encoder(text)
+    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        text_outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # Use the last token's hidden state (or pooled output if available)
+        pooled_output = text_outputs.pooler_output if hasattr(text_outputs, 'pooler_output') else text_outputs.last_hidden_state[:, -1]
+        return self.text_projection(pooled_output)
 
     def save_pretrained(self, save_directory: str, **kwargs):
         """Customize save method, save additional parameters"""
@@ -170,18 +186,21 @@ class CLIP(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass for the CLIP model.
-        Args:
-            pixel_values: The pixel values of the image.
-            input_ids: The input ids of the text.
-            attention_mask: The attention mask of the text.
-            labels: The labels for the text features.
-            (NOTE: you don't need to use the variable `labels`, this is just for compatibility with the Trainer class)
-            (Hint: refer to returned values of the __getitem__ method in the CaptionDatasetForTraining class)
         Returns:
-            TODO: think about the what values should be returned
+            tuple: (image_features, text_features, logit_scale)
+                - image_features: normalized image embeddings [batch_size, proj_dim]
+                - text_features: normalized text embeddings [batch_size, proj_dim]
+                - logit_scale: temperature parameter for scaling logits
         """
-        raise NotImplementedError("Not implemented")
-
+        # Encode image and text
+        image_features = self.encode_image(pixel_values)
+        text_features = self.encode_text(input_ids, attention_mask)
+        
+        # Normalize features
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
+        return image_features, text_features, self.logit_scale.exp()
 
 def compute_clip_loss(
     outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -189,18 +208,26 @@ def compute_clip_loss(
     num_items_in_batch: int | None = None,
 ) -> torch.Tensor:
     """
-    Compute the loss for the CLIP model.
-    Args:
-        outputs: A tuple containing the outputs of CLIP.forward().
-        labels: The labels for the text features.
-        (NOTE: you don't need to use the variable `labels`, this is just for compatibility with the Trainer class)
-        num_items_in_batch: The number of items in the batch.
-        (NOTE: you don't need to use the variable `num_items_in_batch`, this is just for compatibility with Trainer)
-    Returns:
-        The loss for the CLIP model.
+    Compute the contrastive loss for the CLIP model.
     """
-    raise NotImplementedError("Not implemented")
-
+    image_features, text_features, logit_scale = outputs
+    
+    # Compute similarity matrix
+    # logits[i, j] = similarity between image i and text j
+    logits = logit_scale * image_features @ text_features.T  # [batch_size, batch_size]
+    
+    # Create labels - diagonal elements are positive pairs
+    batch_size = image_features.shape[0]
+    labels = torch.arange(batch_size, device=logits.device)
+    
+    # Symmetric loss: image-to-text and text-to-image
+    loss_i2t = nn.functional.cross_entropy(logits, labels)
+    loss_t2i = nn.functional.cross_entropy(logits.T, labels)
+    
+    # Average the two losses
+    loss = (loss_i2t + loss_t2i) / 2
+    
+    return loss
 
 def get_target_modules_for_lora(model: nn.Module) -> list[str]:
     target_modules = []
@@ -317,16 +344,15 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
     testset = MultiChoiceQADataset(val_dataset)
 
     clip = load(ckpt_path)
-    clip = clip.model.to(device)
+    # Don't unwrap! Keep the PeftModel wrapper
+    clip = clip.to(device)  # Remove .model here
 
-    image_processor = tv.transforms.Compose(
-        [
-            tv.transforms.Resize(192),
-            tv.transforms.CenterCrop(192),
-            tv.transforms.ToTensor(),
-            tv.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        ]
-    )
+    image_processor = tv.transforms.Compose([
+        tv.transforms.Resize(192),
+        tv.transforms.CenterCrop(192),
+        tv.transforms.ToTensor(),
+        tv.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+    ])
 
     correct_count = 0
     total_count = 0
