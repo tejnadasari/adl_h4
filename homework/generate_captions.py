@@ -36,32 +36,32 @@ def generate_caption(info_path: str, view_index: int, img_width: int = 150, img_
     
     ego_center_x, ego_center_y = ego_car["center"]
     
+    # Generate multiple simple captions instead of one complex one
     # 1. Ego car caption
     captions.append(f"{ego_car['kart_name']} is the ego car.")
     
-    # 2. Counting caption
-    captions.append(f"There are {len(kart_objects)} karts in the scenario.")
-    
-    # 3. Track name caption
+    # 2. Track name caption
     captions.append(f"The track is {track_name}.")
     
-    # 4. Relative position captions for each non-ego kart
-    for kart in kart_objects:
-        if kart["is_center_kart"]:
-            continue
-        
+    # 3. Counting caption
+    captions.append(f"There are {len(kart_objects)} karts in the scene.")
+    
+    # 4. Add some positional captions (but not all - keep it manageable)
+    # Only add captions for up to 2-3 other karts to avoid overwhelming the model
+    other_karts = [k for k in kart_objects if not k["is_center_kart"]]
+    for kart in other_karts[:3]:  # Limit to first 3 other karts
         kart_center_x, kart_center_y = kart["center"]
         kart_name = kart["kart_name"]
         
         # Determine left/right
         lr = "left" if kart_center_x < ego_center_x else "right"
         
-        # Determine front/back (lower Y = front)
+        # Determine front/back
         fb = "front" if kart_center_y < ego_center_y else "back"
         
-        # Create position caption
-        position = f"{fb} and {lr}"
-        captions.append(f"{kart_name} is {position} of the ego car.")
+        # Simpler caption format
+        captions.append(f"{kart_name} is to the {lr}.")
+        captions.append(f"{kart_name} is in {fb}.")
     
     return captions
 
@@ -92,9 +92,7 @@ def check_caption(info_file: str, view_index: int):
 def generate_all_captions(split='train'):
     """
     Generate caption pairs for all images in the dataset.
-    
-    Args:
-        split: Dataset split ('train', 'valid')
+    Each image will have multiple caption pairs (one for each caption).
     """
     data_dir = Path(f'data/{split}')
     all_caption_pairs = []
@@ -121,17 +119,16 @@ def generate_all_captions(split='train'):
         if not captions:
             continue
         
-        # Combine all captions into one descriptive caption
-        combined_caption = " ".join(captions)
-        
         # Get relative image path
         relative_image_path = str(image_path.relative_to(data_dir.parent))
         
-        # Add caption pair
-        all_caption_pairs.append({
-            "caption": combined_caption,
-            "image_file": relative_image_path
-        })
+        # Create MULTIPLE training pairs - one for each caption
+        # This is important for CLIP training!
+        for caption in captions:
+            all_caption_pairs.append({
+                "caption": caption,
+                "image_file": relative_image_path
+            })
     
     print(f"Generated {len(all_caption_pairs)} caption pairs")
     

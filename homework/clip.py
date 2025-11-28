@@ -344,8 +344,8 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
     testset = MultiChoiceQADataset(val_dataset)
 
     clip = load(ckpt_path)
-    # Don't unwrap! Keep the PeftModel wrapper
-    clip = clip.to(device)  # Remove .model here
+    clip = clip.to(device)
+    clip.eval()  # Add this!
 
     image_processor = tv.transforms.Compose([
         tv.transforms.Resize(192),
@@ -357,22 +357,30 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
     correct_count = 0
     total_count = 0
 
-    for pair in tqdm.tqdm(testset):
-        image = Image.open(pair["image_path"]).convert("RGB")
-        pixel_values = image_processor(image).unsqueeze(0).to(device).bfloat16()
-        text_inputs = processor(
-            text=[s + processor.tokenizer.eos_token for s in pair["candidates"]],
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        )
-        input_ids = text_inputs["input_ids"].long().to(device)
-        attention_mask = text_inputs["attention_mask"].to(device)
-        vision_feature, text_feature, _ = clip(pixel_values, input_ids, attention_mask)
-        prediction = torch.matmul(vision_feature, text_feature.T).argmax(dim=-1)
-        if prediction == pair["correct_index"]:
-            correct_count += 1
-        total_count += 1
+    with torch.no_grad():  # Add this!
+        for pair in tqdm.tqdm(testset):
+            image = Image.open(pair["image_path"]).convert("RGB")
+            pixel_values = image_processor(image).unsqueeze(0).to(device).bfloat16()
+            text_inputs = processor(
+                text=[s + processor.tokenizer.eos_token for s in pair["candidates"]],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            )
+            input_ids = text_inputs["input_ids"].long().to(device)
+            attention_mask = text_inputs["attention_mask"].to(device)
+            
+            vision_feature, text_feature, _ = clip(
+                pixel_values=pixel_values,
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+            
+            # vision_feature is [1, proj_dim], text_feature is [num_candidates, proj_dim]
+            prediction = torch.matmul(vision_feature, text_feature.T).argmax(dim=-1).item()
+            if prediction == pair["correct_index"]:
+                correct_count += 1
+            total_count += 1
 
     print(f"Accuracy: {correct_count / total_count}")
 
