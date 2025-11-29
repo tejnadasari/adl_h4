@@ -20,10 +20,9 @@ device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 
 def load(model_name: str = "clip_model"):
     from pathlib import Path
-
     from peft import PeftModel
 
-    model_path = Path(__file__).parent / model_name
+    model_path = str(Path(__file__).parent / model_name)  # Added str()
 
     vlm = BaseVLM()
     vision_encoder = vlm.model.model.vision_model
@@ -246,7 +245,7 @@ def get_target_modules_for_lora(model: nn.Module) -> list[str]:
 def train(
     data_dir: Path | None = None,
     output_dir: str = "clip",
-    num_train_epochs: float = 0.05,  # for debugging purpose, increase this once the dry run works
+    num_train_epochs: float = 0.05,
     per_device_train_batch_size: int = 1024,
     gradient_accumulation_steps: int = 1,
     learning_rate: float = 5e-4,
@@ -265,7 +264,7 @@ def train(
     # Initialize model and processor
     vision_encoder = vlm.model.model.vision_model
     text_encoder = vlm.model.model.text_model
-    model = CLIP(vision_encoder, text_encoder).to(device).bfloat16()
+    model = CLIP(vision_encoder, text_encoder).to(device)  # Removed .bfloat16()
     model.set_trainable_parameters()
 
     peft_config = LoraConfig(
@@ -274,7 +273,6 @@ def train(
         r=8,
         lora_alpha=32,
         lora_dropout=0.0,
-        # target_modules="all-linear",
         target_modules=get_target_modules_for_lora(model),
         bias="none",
     )
@@ -298,13 +296,13 @@ def train(
         gradient_accumulation_steps=gradient_accumulation_steps,
         gradient_checkpointing=True,
         learning_rate=learning_rate,
-        bf16=True if device == "cuda" else False,
+        bf16=False,  # Changed to False
         logging_steps=1,
         save_strategy="steps",
         save_steps=50,
         save_total_limit=2,
         label_names=["labels"],
-        dataloader_num_workers=num_workers,
+        dataloader_num_workers=2,  # Changed to 2
     )
 
     trainer = Trainer(
@@ -345,7 +343,7 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
 
     clip = load(ckpt_path)
     clip = clip.to(device)
-    clip.eval()
+    clip.eval()  # Added
 
     image_processor = tv.transforms.Compose([
         tv.transforms.Resize(192),
@@ -357,7 +355,7 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
     correct_count = 0
     total_count = 0
 
-    with torch.no_grad():
+    with torch.no_grad():  # Added
         for pair in tqdm.tqdm(testset):
             image = Image.open(pair["image_path"]).convert("RGB")
             pixel_values = image_processor(image).unsqueeze(0).to(device).bfloat16()
@@ -370,13 +368,14 @@ def test(ckpt_path: str, val_dataset: str = "valid_grader"):
             input_ids = text_inputs["input_ids"].long().to(device)
             attention_mask = text_inputs["attention_mask"].to(device)
             
+            # Use keyword arguments
             vision_feature, text_feature, _ = clip(
                 pixel_values=pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask
             )
             
-            prediction = torch.matmul(vision_feature, text_feature.T).argmax(dim=-1).item()
+            prediction = torch.matmul(vision_feature, text_feature.T).argmax(dim=-1).item()  # Added .item()
             if prediction == pair["correct_index"]:
                 correct_count += 1
             total_count += 1
