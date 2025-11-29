@@ -92,7 +92,7 @@ def check_caption(info_file: str, view_index: int):
 def generate_all_captions(split='train'):
     """
     Generate caption pairs for all images in the dataset.
-    Each image will have multiple caption pairs (one for each caption).
+    Each image gets ONE simple caption (not all concatenated).
     """
     data_dir = Path(f'data/{split}')
     all_caption_pairs = []
@@ -122,11 +122,11 @@ def generate_all_captions(split='train'):
         # Get relative image path
         relative_image_path = str(image_path.relative_to(data_dir.parent))
         
-        # Create MULTIPLE training pairs - one for each caption
-        # This is important for CLIP training!
+        # KEY CHANGE: Create multiple training pairs instead of concatenating
+        # Each caption becomes a separate training example
         for caption in captions:
             all_caption_pairs.append({
-                "caption": caption,
+                "caption": caption,  # Individual caption, not combined!
                 "image_file": relative_image_path
             })
     
